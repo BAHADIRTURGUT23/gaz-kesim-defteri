@@ -1,0 +1,96 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function uye() {
+      return signedIn() && exists(/databases/$(database)/documents/uyeler/$(request.auth.uid));
+    }
+    function admin() {
+      return signedIn() && exists(/databases/$(database)/documents/yoneticiler/$(request.auth.uid));
+    }
+    function benimAd() {
+      return get(/databases/$(database)/documents/uyeler/$(request.auth.uid)).data.ad;
+    }
+
+    // Takım kodu ve yönetici kodu yalnızca Firebase konsolundan yazılır, uygulamadan okunamaz.
+    match /ayar/{d} {
+      allow read, write: if false;
+    }
+
+    // Ekip listesi: giriş yapan herkes okur, yalnızca yönetici yazar.
+    match /ekip/{slot} {
+      allow read: if signedIn();
+      allow write: if admin();
+    }
+
+    // Üye kaydı: sicil ekip listesinde olmalı ve takım kodu doğru olmalı.
+    // Ya da yönetici kodu ile yönetici hesabı açılır.
+    match /uyeler/{uid} {
+      allow read: if request.auth != null && (request.auth.uid == uid || admin());
+      allow create: if request.auth != null && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['sicil', 'ad', 'slot', 'kod', 'yk'])
+        && request.resource.data.keys().hasAll(['sicil', 'ad', 'slot', 'kod', 'yk'])
+        && request.auth.token.email == request.resource.data.sicil.lower() + '@acil.gazkesim.invalid'
+        && (kodluUye() || yoneticiAdayi());
+      allow update, delete: if admin();
+    }
+
+    function kodluUye() {
+      let d = request.resource.data;
+      return d.ad is string && d.ad != ''
+        && d.slot is string && d.slot != ''
+        && d.kod == get(/databases/$(database)/documents/ayar/kod).data.deger
+        && get(/databases/$(database)/documents/ekip/$(d.slot)).data.sicil == d.sicil
+        && get(/databases/$(database)/documents/ekip/$(d.slot)).data.ad == d.ad;
+    }
+    function yoneticiAdayi() {
+      let d = request.resource.data;
+      return d.ad is string && d.ad != ''
+        && d.yk is string && d.yk != ''
+        && d.yk == get(/databases/$(database)/documents/ayar/yoneticiKodu).data.deger;
+    }
+
+    match /yoneticiler/{uid} {
+      allow read: if request.auth != null && (request.auth.uid == uid || admin());
+      allow create: if request.auth != null && request.auth.uid == uid
+        && get(/databases/$(database)/documents/uyeler/$(uid)).data.yk != ''
+        && get(/databases/$(database)/documents/uyeler/$(uid)).data.yk
+           == get(/databases/$(database)/documents/ayar/yoneticiKodu).data.deger;
+      allow update, delete: if admin();
+    }
+
+    // Gaz kesim ve açım kayıtları
+    match /kayitlar/{id} {
+      allow read: if uye();
+      allow create: if uye() && (
+        (request.resource.data.durum == 'kesik'
+          && request.resource.data.kesenId == request.auth.uid
+          && request.resource.data.kesenAd == benimAd())
+        ||
+        (request.resource.data.durum == 'acik'
+          && request.resource.data.kesmeYok == true
+          && request.resource.data.acanId == request.auth.uid
+          && request.resource.data.acanAd == benimAd())
+      );
+      // Kesik bir kayıt yalnızca "gaz verildi" olarak kapatılabilir.
+      allow update: if uye()
+        && resource.data.durum == 'kesik'
+        && request.resource.data.durum == 'acik'
+        && request.resource.data.acanId == request.auth.uid
+        && request.resource.data.acanAd == benimAd()
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['durum', 'acanId', 'acanAd', 'acanSicil', 'acmaT', 'acNot', 'acVardiya', 'acFoto']);
+      allow delete: if admin();
+    }
+
+    match /fotolar/{id} {
+      allow read: if uye();
+      allow create: if uye()
+        && request.resource.data.kayitId is string
+        && request.resource.data.d is string
+        && request.resource.data.d.size() < 400000;
+      allow delete: if admin();
+    }
+  }
+}
